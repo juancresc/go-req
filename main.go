@@ -20,6 +20,7 @@ func main() {
 	// Define flags
 	rps := flag.Float64("rps", 0, "Requests per second (required)")
 	address := flag.String("address", "", "Address to hit (required)")
+	authentication := flag.String("authentication", "", "Token required for api authentication")
 	// headers is a list of headers to include in the request
 	headers := flag.StringSlice("headers", []string{}, "Headers to include in the request")
 	flag.Parse()
@@ -41,18 +42,30 @@ func main() {
 	lastPrint := time.Now()
 	requests := 0
 	limiter := rate.NewLimiter(rate.Limit(*rps), 1)
-	for {
+	successChannel := make(chan int)
+	successCount := 0
+	errorChannel := make(chan int)
+	errorCount := 0
 
-		if limiter.Allow() {
-			go doRequest(*address, *headers)
-			requests++
+	for {
+		select {
+		case <-successChannel:
+			successCount++
+		case <-errorChannel:
+			errorCount++
+		default:
+			if limiter.Allow() {
+				go doRequest(*address, *headers, *authentication, successChannel, errorChannel)
+				requests++
+			}
+			elapsed := time.Since(started)
+			currentRps := float64(requests) / elapsed.Seconds()
+			if time.Since(lastPrint) > 1*time.Second {
+				clearScreen()
+				log.Printf("Requests: %d, Elapsed time (s): %d, RPS: %s, Success: %d, Error: %d", requests, int(elapsed.Seconds()), fmt.Sprintf("%.2f", currentRps), successCount, errorCount)
+			}
 		}
-		elapsed := time.Since(started)
-		currentRps := float64(requests) / elapsed.Seconds()
-		if time.Since(lastPrint) > 1*time.Second {
-			clearScreen()
-			log.Printf("Requests: %d, Elapsed: %d, RPS: %s", requests, int64(elapsed.Seconds()), fmt.Sprintf("%.2f", currentRps))
-		}
+
 	}
 }
 
@@ -69,11 +82,13 @@ func clearScreen() {
 	}
 }
 
-func doRequest(url string, headers []string) {
+func doRequest(url string, headers []string, authentication string, successChannel chan int, errorChannel chan int) {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
+		// count error
+		errorChannel <- 1
 	}
 	for _, header := range headers {
 		headerParts := strings.Split(header, ":")
@@ -83,10 +98,22 @@ func doRequest(url string, headers []string) {
 		}
 		req.Header.Set(headerParts[0], headerParts[1])
 	}
+	if authentication != "" {
+		req.Header.Set("Authentication", fmt.Sprintf("bearer %s", authentication))
+	}
 	resp, err := client.Do(req)
 	io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		log.Printf("Error making request: %v", err)
+		// count error
+		errorChannel <- 1
 	}
+	if resp.StatusCode != 200 {
+		log.Printf("Error: Status code %d", resp.StatusCode)
+		// count error
+		errorChannel <- 1
+	}
+	// count success
+	successChannel <- 1
 	defer resp.Body.Close()
 }
